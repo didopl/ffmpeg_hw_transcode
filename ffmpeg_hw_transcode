@@ -26,7 +26,7 @@ help_and_exit(){
 		-o|--output-file	Specify output file
 		-q|--quality		Set quality. HEVC and H264: 0-51, AV1, VP8/9: 0-63 Higher values are better, one value may produce different results with different codecs.
 		-t|--threads		Set the number of threads.
-		-s|--slow		Enables slow mode. This enables the AV1 codec as it is more computing intensive. On GPUs it might not be slower but on CPUs it is significantly slower.
+		-s|--slow		Enables slow mode. Force the CPU to transcode the video.
 	EOF
 	exit 0
 }
