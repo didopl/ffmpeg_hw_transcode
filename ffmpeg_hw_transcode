@@ -1,0 +1,179 @@
+#!/bin/bash
+
+cpu=
+gpu_interface=
+bitrate=
+codec=
+input_file=
+output_file=
+live=
+threads=
+sup_codecs=
+quality=
+slow=
+render_dev="/dev/dri/renderD128"
+threads=
+tmp_codec=
+tmp_quality=
+
+help_and_exit(){
+	cat <<-EOF
+	$0 [OPTIONS]
+	Options:
+		-h|--help		Show this help
+		-c|--codec		Set codec
+		-i|--input-file		Specify input file
+		-o|--output-file	Specify output file
+		-q|--quality		Set quality. HEVC and H264: 0-51, AV1, VP8/9: 0-63 Higher values are better, one value may produce different results with different codecs.
+		-t|--threads		Set the number of threads.
+		-s|--slow		Enables slow mode. This enables the AV1 codec as it is more computing intensive. On GPUs it might not be slower but on CPUs it is significantly slower.
+	EOF
+	exit 0
+}
+
+error(){
+	echo -e "\033[0;31mError: $1\033[0m"
+	exit 1
+}
+
+warn(){
+	echo -e "\033[1;33mWarning: $1\033[0m"
+	return 0
+}
+	
+get_optimal_video_codec(){
+	local input_file=$1
+	[ -f "$input_file" ] || error "$input_file: No such file."
+	[ -f "$(which exiftool)" ] || echo WWWWW # warn "exiftool not installed. Cannot detect optimal codec. Using h264..." && codec="h264" && return 0
+	width=$(exiftool "$input_file" | grep "Width")
+	width=${width##*" "}
+	[ $width -lt 2000 ] && set_codec "h264"
+	[ $width -ge 2000 ] && set_codec "hevc"
+	[ -n "$slow" ] && codec="av1"
+}
+
+get_gpu_interface(){
+	local vga=
+	vga=$(lspci | grep VGA | grep -E "(NVIDIA|AMD|Intel)")
+	gpu_interface="vaapi"
+	[ -n "$(echo $vga | grep NVIDIA)" ] && gpu_interface="nvenc"
+}
+
+check_codec_supported_by_gpu(){
+	# echo check_codec_hw: $codec
+	# echo $gpu_interface
+	if [ "$gpu_interface" = "vaapi" ]; then
+		local sup_profiles=$(vainfo)
+		[ -n "$(echo "$sup_profiles" | grep -i "VAProfile$codec")" ] || { cpu=1; return 0;}
+	fi
+	# echo check passed!
+	local codecs=
+	codecs=$(ffmpeg -hide_banner -codecs)
+	cpu=1
+	[ -n "$(echo $codecs | grep $codec | grep vaapi)" ] && cpu=
+	[ -n "$(echo $codecs | grep $codec | grep nvenc)" ] && cpu=
+	# [ -n "$(echo $codecs | grep $codec | grep qsv)" ] && cpu=
+}
+
+set_quality(){
+	# echo $codec
+	if [ "$codec" = "h264" ] || [ "$codec" = "h265" ] || [ "$codec" = "hevc" ]; then
+		quality=$((51-$1))
+	elif [ "$codec" = "av1" ]; then
+		quality="$((63-$1))"
+	elif [ "$codec" = "vp9" ] || [ "$codec" = "vp8" ]; then
+		quality=$((63-$1))
+	else
+		error "$codec does not support crf."
+	fi
+}
+
+set_codec_hardware(){
+	[ "$1" = "h265" ] && codec="hevc"
+
+}
+
+set_codec_software(){
+	[ "$1" = "h265" ] || [ "$1" = "hevc" ] && codec="libx265"
+	[ "$1" = "h264" ] && codec="libx264"
+	[ "$1" = "vp8" ] && codec="libvpx"
+	[ "$1" = "vp9" ] && codec="libvpx-vp9"
+	[ "$1" = "av1" ] && codec="libsvtav1"
+}
+
+set_codec(){
+	codec="$1"
+	[ -n "$codec" ] || get_optimal_video_codec "$input_file"
+	set_codec_hardware "$1"
+	echo $codec
+	[ -n "$slow" ] && cpu=1 || check_codec_supported_by_gpu
+	[ -n "$quality" ] || set_quality "$tmp_quality"
+	[ -n "$cpu" ] && set_codec_software "$1"
+}
+
+vaapi_transcode(){
+	ffmpeg -threads "$threads" -init_hw_device vaapi=foo:"$render_dev" -hwaccel vaapi -hwaccel_output_format vaapi -hwaccel_device foo -i "$input_file" -filter_hw_device foo -vf 'format=nv12|vaapi,hwupload' -c:v "$codec"_vaapi -qp "$quality" "$output_file"
+	exit 0
+}
+cpu_transcode(){
+	ffmpeg -threads "$threads" -i "$input_file" -c:v "$codec" -preset 5 -crf "$quality" "$output_file"
+	exit 0
+}
+
+nvenc_transcode(){
+	ffmpeg -threads "$threads" -i "$input_file" -c:v "$codec"_nvenc -pixel_format yuv444p -preset default "$output_file"
+	exit 0
+}
+
+get_gpu_interface
+
+options=$(getopt -o c:i:o:q:t:h --longoptions help,slow,codec:,input-file:,output-file:,threads:,quality: -- "$@")
+eval set -- "$options"
+
+while true; do
+	case "$1" in
+		-h|--help)
+			help_and_exit
+			shift
+			;;
+		-c|--codec)
+			codec="$2"
+			shift 2
+			;;
+		-i|--input-file)
+			input_file="$2"
+			shift 2
+			;;
+		-o|--output-file)
+			output_file="$2"
+			shift 2
+			;;
+		-q|quality)
+			tmp_quality=$2
+			shift 2
+			;;
+		-t|--threads)
+			threads="$2"
+			shift 2
+			;;
+		--slow)
+			slow=1
+			shift
+			;;
+		--)
+			shift
+			break
+			;;
+		*)
+			echo "ERROR"; exit 1
+
+	esac
+done
+
+[ -n "$threads" ] || threads=$(nproc)
+set_codec "$codec"
+echo Codec: "$codec"
+[ -z "$cpu" ] || cpu_transcode
+[ "$gpu_interface" = "vaapi" ] && vaapi_transcode
+[ "$gpu_interface" = "nvenc" ] && nvenc_transcode
+
