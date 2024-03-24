@@ -38,16 +38,15 @@ warn(){
 	echo -e "\033[1;33mWarning: $1\033[0m"
 	return 0
 }
-	
+
 get_optimal_video_codec(){
 	local input_file=$1
 	[ -f "$input_file" ] || error "$input_file: No such file."
-	[ -f "$(which exiftool)" ] || echo WWWWW # warn "exiftool not installed. Cannot detect optimal codec. Using h264..." && codec="h264" && return 0
+	[ -f "$(which exiftool)" ] || { warn "exiftool not installed. Cannot detect optimal codec. Using h264..." ; set_codec "h264" ; return 0}
 	width=$(exiftool "$input_file" | grep "Width")
 	width=${width##*" "}
 	[ "$width" -lt 2000 ] && set_codec "h264"
 	[ "$width" -ge 2000 ] && set_codec "hevc"
-	[ -n "$slow" ] && codec="av1"
 }
 
 get_gpu_interface(){
@@ -170,7 +169,7 @@ while true; do
 			break
 			;;
 		*)
-			echo "ERROR"; exit 1
+			error "Unknown option: $1"
 
 	esac
 done
@@ -178,7 +177,7 @@ done
 [ -n "$threads" ] || threads=$(nproc)
 set_codec "$codec"
 echo Codec: "$codec"
-[ -z "$cpu" ] || cpu_transcode
+[ -n "$cpu" ] && cpu_transcode
 [ "$gpu_interface" = "vaapi" ] && vaapi_transcode
 [ "$gpu_interface" = "nvenc" ] && nvenc_transcode
 
